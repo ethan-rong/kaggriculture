@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 616" width="920" height="616" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<style>
+.t{fill:#1f2328}.m{fill:#4d5761}
+.ours{fill:#eef7f0;stroke:#2f8f4e}.pub{fill:#f4f5f7;stroke:#c4cbd3}.mix{fill:#f7f5ec;stroke:#c9a227}
+.pours{fill:#2f8f4e}.ppub{fill:#8c959f}.pmix{fill:#a8861c}.pt{fill:#ffffff}
+.arrow{stroke:#8c959f;fill:none}.head{fill:#8c959f}
+@media (prefers-color-scheme:dark){
+.t{fill:#e6edf3}.m{fill:#9ea7b0}
+.ours{fill:#12261a;stroke:#3fb950}.pub{fill:#1c2128;stroke:#3d444d}.mix{fill:#24210f;stroke:#d4b13c}
+.pours{fill:#238636}.ppub{fill:#545d68}.pmix{fill:#9e7d16}
+.arrow{stroke:#656c76}.head{fill:#656c76}}
+</style>
+<text x="140" y="32" class="t" font-size="17" font-weight="600">One turn through the final bot</text>
+
+<!-- observation in, action out -->
+<path d="M96 60 V586" class="arrow" stroke-width="2"/>
+<path d="M88 576 L96 592 L104 576 Z" class="head"/>
+<text transform="translate(80 330) rotate(-90)" class="m" font-size="13" text-anchor="middle">observation in · each layer hides the wheat it holds</text>
+<path d="M824 586 V66" class="arrow" stroke-width="2"/>
+<path d="M816 76 L824 60 L832 76 Z" class="head"/>
+<text transform="translate(848 330) rotate(90)" class="m" font-size="13" text-anchor="middle">action out · the top three layers edit market orders only</text>
+
+<!-- v469 -->
+<rect x="140" y="56" width="640" height="84" rx="12" class="ours" stroke-width="1.6"/>
+<text x="160" y="84" class="t" font-size="15" font-weight="600">Front-run layer</text>
+<rect x="690" y="68" width="72" height="22" rx="11" class="pours"/><text x="726" y="83.5" class="pt" font-size="11" font-weight="700" text-anchor="middle" letter-spacing=".5">OURS</text>
+<text x="160" y="108" class="m" font-size="13">Reads the rival's trades from market inventory and its money. Buys WHEAT one step</text>
+<text x="160" y="126" class="m" font-size="13">before the rival's tick wash and sells into it; answers rivals that close in the same step.</text>
+
+<!-- v467 -->
+<rect x="140" y="156" width="640" height="84" rx="12" class="ours" stroke-width="1.6"/>
+<text x="160" y="184" class="t" font-size="15" font-weight="600">Order-safety layer</text>
+<rect x="690" y="168" width="72" height="22" rx="11" class="pours"/><text x="726" y="183.5" class="pt" font-size="11" font-weight="700" text-anchor="middle" letter-spacing=".5">OURS</text>
+<text x="160" y="208" class="m" font-size="13">Never merges our wash into a buy the same step closes; never sorts a sale ahead of a</text>
+<text x="160" y="226" class="m" font-size="13">same-step buy of that item; closes our wash in-step while the rival is washing too.</text>
+
+<!-- v466 -->
+<rect x="140" y="256" width="640" height="84" rx="12" class="ours" stroke-width="1.6"/>
+<text x="160" y="284" class="t" font-size="15" font-weight="600">Tick-wash layer</text>
+<rect x="690" y="268" width="72" height="22" rx="11" class="pours"/><text x="726" y="283.5" class="pt" font-size="11" font-weight="700" text-anchor="middle" letter-spacing=".5">OURS</text>
+<text x="160" y="308" class="m" font-size="13">Holds WHEAT across the town's consumption tick (every 4 steps, steps 48 to 712) and</text>
+<text x="160" y="326" class="m" font-size="13">sells the largest-stake lots first. Inner layers see the farm as if that wheat were not there.</text>
+
+<!-- X2 -->
+<rect x="140" y="356" width="640" height="112" rx="12" class="mix" stroke-width="1.6"/>
+<text x="160" y="384" class="t" font-size="15" font-weight="600">X2 body: Demand-Preserving Turn Sale Timing</text>
+<rect x="610" y="368" width="152" height="22" rx="11" class="pmix"/><text x="686" y="383.5" class="pt" font-size="11" font-weight="700" text-anchor="middle" letter-spacing=".5">PUBLIC + OUR PATCHES</text>
+<text x="160" y="408" class="m" font-size="13">tetsutani, Apache-2.0: routes, workers, production and selling. Our in-place patches:</text>
+<text x="160" y="428" class="t" font-size="13">W2 <tspan class="m">wool lots 3 steps earlier once the rival keeps sheep</tspan> · S1 <tspan class="m">tape washes closed in-step</tspan></text>
+<text x="160" y="448" class="t" font-size="13">C1 <tspan class="m">sale reservation from step 240, lead seller all day</tspan> · PF <tspan class="m">stuck-pasture rebuild</tspan></text>
+
+<!-- lineage -->
+<rect x="140" y="484" width="640" height="108" rx="12" class="pub" stroke-width="1.6"/>
+<text x="160" y="512" class="t" font-size="15" font-weight="600">Upstream lineage</text>
+<rect x="690" y="496" width="72" height="22" rx="11" class="ppub"/><text x="726" y="511.5" class="pt" font-size="11" font-weight="700" text-anchor="middle" letter-spacing=".5">PUBLIC</text>
+<text x="160" y="536" class="m" font-size="13">Apache-2.0 Kaggle notebooks by yhay81 (Shop Router), Thomas Tschinkel (state router,</text>
+<text x="160" y="554" class="m" font-size="13">Metav4), Ahmed Berat Ozer (V55, V56), shiiin9, Dmitrii Gluzdov, aurax7, prvsiyan,</text>
+<text x="160" y="572" class="m" font-size="13">destbreso and nathanjacob. Every notice is kept in submission/NOTICE.txt and main.py.</text>
+</svg>

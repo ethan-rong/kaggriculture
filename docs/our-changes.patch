@@ -1,0 +1,963 @@
+--- a/main.py
++++ b/main.py
+@@ -1,3 +1,4 @@
++# v469 F2FRSC3 (2026-09-28, FXC = TWSQ = local modification of X2 55be5d5f; Apache-2.0): v457 W2+S1+PF (W1 only once the rival has shown a sheep; tape wheat washes closed in the same step; v436 stuck-pasture fix) + v454 C1 (premium reservation and RESERVE_START from step 240 instead of 192; lead-seller hours 0-23 instead of 1-22) + v466 TWS + SQ (tick wash: at every step t % 4 == 0 in 48-712 buy n WHEAT and sell it at t+1 across the town consumption tick, hidden from the inner layers; n = shed room if every unit drops all it carries at t+1; placement as TWS; SELL orders stake-sorted) + v467 FXC (fixes: the stake sort never moves a SELL ahead of a same-step BUY of the same item, and the tick-wash BUY is never merged into a WHEAT buy that the same step closes; while the rival is observed tick-washing, all of each wash is sold back in the same step) + v469 F2FRSC3 (market-only; rival flows inferred from the market and its money: front-run the rival tick wash (buy WHEAT at t-1, sell at t at queue index 9, no own wash at t) when the rival tick-washed at >= 2 of t-4, t-8, t-12; no tick wash at t when the rival net-bought >= 20 WHEAT at t-1; after 3 observed same-step closes of the rival (net flow 0, money up), buy WHEAT at t-1 and sell it with a forced same-step close of the wash at t).
+ # Strategy: Use the inspected Pipe-16 HybridOpening controller. Reassign idle workers during the first three days to plant, water and harvest one temporary wheat crop, then restore the planned pasture and deliver the wheat. Preserve the public Metav4 production and market controller. This is attributed reuse, and its stronger public source still needs live confirmation. Disable optional environment-dependent external library loading so the archive is self-contained.
+ # Local packaging modifications, 2026-09-20. Original attribution retained.
+ # Kaggriculture submission v9/3: public V39 (Apache-2.0, notices below) plus the v9 layers
+@@ -904,8 +905,80 @@
+             return
+         action["market"] = [["SELL", item, qty] for item, qty in projected.items()
+                             if qty > 0 and item in PRODUCTS][: self.cfg["max_orders"]]
++
++
++# ---------------------------------------------------------------------------------------------------------
++# v436 PF (ours, 2026-09-26; results/v436/BRIEF.md, PASTURE.md): re-issue a weed-blocked pasture / coop build.
++# _weed_repair turns a tape BUILD_PASTURE / BUILD_COOP on a WEED into a DIG and queues the build, but replays the
++# queue only while the unit's next tape command is a no-op. When the tape walks the unit on (the opening's (4,2)
++# pasture: DIG at step 33, SOUTH at 34) the queue is dropped a step later, the pasture is never built and the cow
++# bought for it waits in the shed to the end (results/v434/CENSUS.md, g104). When _pf_trigger holds, the unit
++# builds at the first legal step (the next one: the DIG left the tile empty and the unit still stands on it), then
++# plays its own tape one step late until a delayed command is a PASS, which it drops to rejoin the tape; the lag
++# ends at the day boundary. The mechanism follows the weed lag replay (_e343_weedlag) of evgendvorkin's public
++# Kaggle notebook "Kaggriculture" (Apache-2.0 notices in that file), re-implemented here inside the chassis so that
++# every outer layer sees the corrected command stream. While _pf_trigger never holds, the chassis output is the
++# base's own, byte for byte (state is written only when it fires).
++# ---------------------------------------------------------------------------------------------------------
++_PF_OPS = ("BUILD_PASTURE", "BUILD_COOP")
++_PF_WEED_REPAIR = Chassis._weed_repair
++
++
++def _pf_trigger(queue, pos, tile, command, step):
++    """The build _weed_repair queued after a weed DIG is about to be lost: the unit still stands on the queued
++    tile, the tile is empty again, it is the same day, and the unit's command this step is not that build."""
++    return (bool(queue) and step % 24 != 0 and tile is None and queue[0][0] == pos
++            and bool(queue[0][1]) and queue[0][1][0] in _PF_OPS and command != queue[0][1])
++
++
++def _pf_weed_repair(self, action, view, st, route, step):
++    _PF_WEED_REPAIR(self, action, view, st, route, step)
++    lag = st.get("pf_lag")
++    if not lag and not st["pending"]:
++        return
++    try:
++        units = [action.get("farmer") or ["PASS"]] + list(action.get("hands") or [])
++        n = min(len(units), len(view.positions))
++        new, keep, drop, fired = list(units), set(lag or ()), set(), set()
++        if keep and step % 24 == 0:
++            keep = set()                                  # new day: hands re-hired, farmer respawned
++        if keep:
++            prev = self._route_action(route, step - 1)
++            tape = [prev.get("farmer") or ["PASS"]] + list(prev.get("hands") or [])
++            for i in sorted(keep):
++                late = tape[i] if i < len(tape) and tape[i] else ["PASS"]
++                if i >= n or late[0] == "PASS":
++                    keep.discard(i)                       # drop the delayed PASS: back on the tape
++                else:
++                    new[i] = list(late)
++                    drop.add(i)
++        for i in range(n):
++            if i in keep:
++                continue
++            p = view.positions[i]
++            if not isinstance(p, (list, tuple)):
++                continue
++            pos = (int(p[0]), int(p[1]))
++            queue = st["pending"].get(i)
++            if _pf_trigger(queue, pos, _tile_at(view.tiles, pos), units[i], step):
++                new[i] = list(queue[0][1])
++                fired.add(i)
++                drop.add(i)
++        if lag is None and not fired:
++            return
++        for i in drop:
++            st["pending"].pop(i, None)                    # queues built against the lagged unit's tape are stale
++        st["pf_lag"] = keep | fired
++        if new != units:
++            action["farmer"] = new[0]
++            action["hands"] = new[1:]
++    except Exception:
++        pass
+ 
+ 
++Chassis._weed_repair = _pf_weed_repair
++
++
+ # --------------------------------------------------------------------------- factory
+ def make_agent(routes, router=None, opponent_plan=None, **settings):
+     """Build a Kaggle ``agent(observation, configuration)`` closure that never raises:
+@@ -985,11 +1058,37 @@
+ del _r42_tape
+ _IMPL=make_agent(_ROUTES,router=_router,**_SETTINGS)
+ _IMPL.chassis.diagnostics['terminal_rescue_errors']=0
++# v457 S1: close each tape wheat wash (BUY_PRODUCT WHEAT n at t, SELL WHEAT n at t+1, t >= 2) in step t, the SELL right after
++# the BUY, as the X2 fork 洛希边际 (sub 56612503) plays it in episode 114265648 (296/297, 300/301, 304/305, ...). Applied to the
++# tape chassis's output (the tape itself is unchanged, so the chassis's sell lead does not pre-sell the wash leg); every layer
++# above sees the closed wash. Only when the whole buy fits the shed (shed + n <= 100): the fork keeps the 2-step wash at 548/560
++# (shed 13 + 90, 26 + 80). Steps 0/1 are untouched (X2's V9 OPENING already trades step 0 in one step, as the fork does).
++_V457_S1_CLOSED={}
++def _v457_s1(obs,action):
++    try:return _v457_s1_close(obs,action)
++    except Exception:return action
++def _v457_s1_close(obs,action):
++    step,player=int(obs['step']),int(obs['player'])
++    tape=_IMPL.chassis.routes.get((_IMPL.chassis.players.get(player) or {}).get('route'))
++    if not tape or step<2 or step>=len(tape):return action
++    m=[list(o) for o in action.get('market') or [] if o]
++    n=_V457_S1_CLOSED.pop(player,None)
++    if n and n[0]==step-1:
++        k=next((k for k,o in enumerate(m) if o[:2]==['SELL','WHEAT'] and len(o)>2),None)
++        if k is not None:
++            if int(m[k][2])>n[1]:m[k][2]=int(m[k][2])-n[1]
++            else:del m[k]
++    b=next((o for o in tape[step].get('market') or [] if o and o[:2]==['BUY_PRODUCT','WHEAT'] and len(o)>2),None)
++    if b and step+1<len(tape) and any(o and o[:2]==['SELL','WHEAT'] and len(o)>2 and int(o[2])==int(b[2]) for o in tape[step+1].get('market') or []):
++        k=next((k for k,o in enumerate(m) if o[:2]==['BUY_PRODUCT','WHEAT'] and len(o)>2 and int(o[2])==int(b[2])),None)
++        if k is not None and len(m)<10 and sum(obs['private']['shed'].values())+int(b[2])<=100:
++            m.insert(k+1,['SELL','WHEAT',int(b[2])]);_V457_S1_CLOSED[player]=(step,int(b[2]))
++    return dict(action,market=m)
+ 
+ def agent(observation,configuration=None):
+     try:
+         action=_IMPL(observation,configuration)
+-        pass
++        action=_v457_s1(observation,action)  # v457 S1
+         return action
+     except Exception:
+         return {'farmer':['PASS'],'hands':[],'market':[]}
+@@ -1678,7 +1777,7 @@
+ def _r36_reserve(obs,action):
+     step=int(obs['step'])
+     # The final planner forecasts its own parent, so keep its full window native.
+-    if not 192<=step<696:return action
++    if not 240<=step<696:return action
+     native=_IMPL.chassis.players[int(obs['player'])]
+     tape=_IMPL.chassis.routes[native['route']]
+     _v9_hz=_V9_ITEM_HZ.get(int(obs['player']))
+@@ -2042,7 +2141,7 @@
+             if not tile['fed_today'] and inv.get('WHEAT',0):command=['FEED']
+             elif not tile['cared_today']:command=['CARE']
+             elif tile['yield_units']:command=['HARVEST']
+-            elif tile['fertilizer_available']:command=['COLLECT_FERTILIZER']
++            elif tile['fertilizer_available'] and not (inv.get('WOOL',0) and _V233_STATES.get(int(obs['player']),{}).get('rival_sheep')):command=['COLLECT_FERTILIZER']  # v457 W2
+         if command:tasks.append((abs(pos[0]-x)+abs(pos[1]-y),targets.index(target),target,command))
+     if tasks:
+         _,_,target,command=min(tasks);return _v219_walk(pos,target) or command
+@@ -2079,6 +2178,7 @@
+         state={'last_step':step,'day':-1,'workers':{},'work':{},'credit':{'WOOL':0,'FERTILIZER':0}}
+         _V233_STATES[player]=state
+     state['last_step']=step
++    state['rival_sheep']=state.get('rival_sheep') or any(isinstance(t,dict) and t.get('animal')=='SHEEP' for row in observation['farms'][1-player]['tiles'] for t in row)  # v457 W2 (sticky)
+     if configuration is not None and any(configuration.get(k,v)!=v for k,v in
+         (('boardSize',10),('turnsPerDay',24),('shedCapacity',100),('maxMarketOrdersPerTurn',10))):return action
+     if day<11:return action
+@@ -3986,7 +4086,7 @@
+ 
+ def _r36_reserve(obs, action):
+     step = int(obs["step"])
+-    if not 192 <= step < 696:
++    if not 240 <= step < 696:
+         return action
+     prices = obs["market"]["prices"]
+     glutted = {i for i in V9_RACEGATE_BASE
+@@ -7984,7 +8084,7 @@
+ # Step798 candidate: extend MODELPX to hour 1 only for very high public quotes (>=100).
+ # Hour 0/23 and low-price hour-1 behavior remain exact step794.
+ _S798_BASE_APPLY = _s758_apply
+-_S758_HOURS = tuple(range(1,23))
++_S758_HOURS = tuple(range(0,24))
+ def _s798_apply(observation, action):
+     step=int(observation['step'])
+     if step%24 != 1:
+@@ -10135,3 +10235,791 @@
+ step1009_step1008_fortyfirst_final_fixedsell_closure_agent.telemetry=_S1009_REPORT
+ agent=step1009_step1008_fortyfirst_final_fixedsell_closure_agent
+ kaggle_submission_agent=agent
++
++
++# ---------------------------------------------------------------------------
++# v466 MARKET layer (2026-09-28, lane v466; results/v466/MECH.md): market orders only. No farm, land, planting, animal or
++# hire order of I2 is changed, so the town draw (one rng per EMPTY tile) is untouched.
++# TW, the tick wash (MECH M1): the X2 forks XIAO MA / NineThree / weense buy WHEAT at every step t with t % 4 == 0 and
++#   sell it at t+1, holding it across the town's consumption tick (engine _town_consume runs after the market phase of
++#   t % 4 == 0 steps). Each held unit gains the price rise of ~3 consumed units (~0.12 coin), ~110 times a game.
++#   Here: steps 48..712, n = 99 - (shed + carried + this step's harvest/collect - feed/fertilize/place + I2's buys -
++#   I2's fillable sells) (room_guard's bound: every unit may drop all it carries at t+1 and it still fits)
++#   [rival sizing: n = 100 - (the shed after this step's unit actions + I2's buys - I2's fillable sells), as the forks do];
++#   money guard: money - cost(n) >= spend of I2's orders now + spend of the tape's orders at t+1 + 300, cost = the
++#   lockstep upper bound (a rival buying at the same index); n >= 10.
++#   The wash is hidden from I2: while it is held, I2 acts on a copy of the observation without it (shed WHEAT - held,
++#   money + its cost, market WHEAT inventory + held and that quote), so every inner layer decides as I2 does; a
++#   PICKUP WHEAT beyond the stock I2 sees is capped to that stock (same engine outcome as I2).
++#   Placement (per arm): SMART = merge into I2's own WHEAT order of the same side; else at t right after I2's last
++#   SELL/BUY_PRODUCT, and at t+1 before I2's first spend order (no price-sensitive order of I2 moves at t, and nothing
++#   of I2 spends before the sale at t+1). END = appended (the sale goes to index 0 when I2's orders at t+1 would spend
++#   more than the money held). ZERO = index 0.
++# SQ, the stake sort (MECH M4): I2's SELL orders (qty > 0) are re-sorted into their own slots by descending
++#   stake = qty x (quote - quote after qty units) (engine price function _r37_market_price); every other order keeps
++#   its index. Ties keep I2's order.
++# When no feature changes the step's orders, I2's action is returned unchanged.
++# ---------------------------------------------------------------------------
++_X466_PARENT = agent
++_X466_CFG = dict(tw='SMART', rival=False, sq=True)
++_X466_LO, _X466_HI, _X466_NMIN, _X466_CARRY = 48, 712, 10, 3
++_X466_SPEND = ("HIRE", "BUY_LAND", "BUY_ANIMAL", "BUY_SEED", "BUY_PRODUCT")
++_X466_STATE = {}
++_X466_REPORT = dict(fired=0, first_fire=-1, washes=0, units=0, underfill=0, carried=0, revealed=0, pickup_capped=0,
++                    fallback0=0, skipped_full=0, skipped_money=0, sq_steps=0, errors=0)
++
++
++def _x466_copy(d, **changes):
++    """shallow copy of a dict / kaggle Struct with some keys replaced (Struct keeps attribute access)"""
++    try:
++        c = type(d)(**d)
++    except Exception:
++        c = dict(d)
++    for k, v in changes.items():
++        c[k] = v
++        if hasattr(c, "__dict__"):
++            c.__dict__[k] = v
++    return c
++
++
++def _x466_spend(orders, prices, hires_today, quadrants):
++    tot, h, q = 0.0, int(hires_today), int(quadrants)
++    for o in orders:
++        if not o or not isinstance(o, (list, tuple)):
++            continue
++        op, n = o[0], (_int(o[2]) if len(o) >= 3 else 1)
++        if op == "BUY_SEED":
++            tot += SEED_PRICE.get(o[1], 0) * n
++        elif op == "BUY_ANIMAL":
++            tot += ANIMAL_COST.get(o[1], 0) * n
++        elif op == "BUY_PRODUCT":
++            tot += (int(prices.get(o[1], 0)) + 5) * n
++        elif op == "BUY_LAND":
++            if 1 <= q <= len(LAND_PRICES):
++                tot += LAND_PRICES[q - 1]
++                q += 1
++        elif op == "HIRE":
++            tot += _fib(h)
++            h += 1
++    return tot
++
++
++def _x466_room(view, action, proj, rival):
++    market = action.get("market") or []
++    buys = sum(max(0, _int(o[2])) for o in market if o and len(o) >= 3 and o[0] in ("BUY_PRODUCT", "BUY_ANIMAL"))
++    sells = sum(min(int(proj.get(o[1], 0)), max(0, _int(o[2]))) for o in market if o and len(o) >= 3 and o[0] == "SELL")
++    if rival:
++        return 100 - (sum(int(v) for v in proj.values()) + buys - sells)
++    units = [action.get("farmer") or ["PASS"]] + list(action.get("hands") or [])
++    carried = sum(max(0, _int(n)) for inv in view.invs for n in inv.values())
++    produced = consumed = 0
++    for i in range(min(len(units), len(view.positions))):
++        a, tile = units[i], _tile_at(view.tiles, view.positions[i])
++        if not a:
++            continue
++        if a[0] == "HARVEST" and isinstance(tile, dict):
++            produced += max(0, _int(_get(tile, "yield_units", 0)))
++        elif a[0] == "COLLECT_FERTILIZER" and isinstance(tile, dict) and _get(tile, "fertilizer_available"):
++            produced += 1
++        elif a[0] in ("FEED", "FERTILIZE") or (a[0] == "PLACE" and len(a) > 1 and a[1] in ANIMAL_STRUCTURE):
++            consumed += 1
++    shed = sum(int(v) for v in view.shed.values())
++    return 99 - (shed + carried + produced - consumed + buys - sells)
++
++
++def _x466_fire(step):
++    _X466_REPORT["fired"] = 1
++    if _X466_REPORT["first_fire"] < 0:
++        _X466_REPORT["first_fire"] = step
++
++
++def _x466_hide(obs, h):
++    """the observation I2 would see without the held wash"""
++    player, private, market = int(obs["player"]), obs["private"], obs["market"]
++    shed = _x466_copy(private["shed"], WHEAT=max(0, int(private["shed"].get("WHEAT", 0)) - h["held"]))
++    farms = list(obs["farms"])
++    farms[player] = _x466_copy(farms[player], money=float(farms[player]["money"]) + h["cost"])
++    inv = _x466_copy(market["inventory"], WHEAT=int(market["inventory"]["WHEAT"]) + h["held"])
++    prices = _x466_copy(market["prices"], WHEAT=_r37_market_price("WHEAT", inv["WHEAT"]))
++    return _x466_copy(obs, private=_x466_copy(private, shed=shed), farms=farms,
++                      market=_x466_copy(market, inventory=inv, prices=prices))
++
++
++def _x466_verify(obs, h):
++    """wash units actually held at t+1 (the BUY may under-fill): shed WHEAT now minus what I2 alone would hold"""
++    have = int(obs["private"]["shed"].get("WHEAT", 0))
++    alone = h["pre"] + h["pbuy"] - min(h["psell"], h["pre"] + h["pbuy"])
++    held = max(0, min(h["n"], have - alone))
++    if held < h["n"]:
++        _X466_REPORT["underfill"] += 1
++    return held
++
++
++def _x466_sq(obs, market):
++    inv = obs["market"]["inventory"]
++    slots = [k for k, o in enumerate(market) if isinstance(o, list) and len(o) >= 3 and o[0] == "SELL"
++             and o[1] in PRODUCTS and _int(o[2]) > 0]
++    if len(slots) < 2:
++        return market
++
++    def stake(o):
++        i, q = int(inv.get(o[1], 0)), _int(o[2])
++        return q * (_r37_market_price(o[1], i) - _r37_market_price(o[1], i + q))
++    order = sorted(slots, key=lambda k: -stake(market[k]))
++    new = list(market)
++    for s, k in zip(slots, order):
++        new[s] = market[k]
++    return new
++
++
++def _x466_sell(obs, seen, action, market, h):
++    """add the held wash's SELL at t+1 (per placement); False if the queue is full"""
++    mode, n = _X466_CFG["tw"], h["held"]
++    if n <= 0:
++        return True
++    if mode == "SMART":
++        first_spend = next((k for k, o in enumerate(market) if isinstance(o, list) and o and o[0] in _X466_SPEND), len(market))
++        k = next((k for k, o in enumerate(market[:first_spend]) if isinstance(o, list) and o[:2] == ["SELL", "WHEAT"]
++                  and len(o) >= 3), None)
++        if k is not None:
++            market[k] = ["SELL", "WHEAT", _int(market[k][2]) + n]
++            return True
++        if len(market) >= 10:
++            return False
++        market.insert(first_spend, ["SELL", "WHEAT", n])
++        return True
++    if len(market) >= 10:
++        return False
++    if mode == "END":
++        farm = obs["farms"][int(obs["player"])]
++        need = _x466_spend(market, obs["market"]["prices"], _get(farm, "hires_today", 0), len(farm["unlocked_quadrants"]))
++        if need > float(farm["money"]):
++            _X466_REPORT["fallback0"] += 1
++            market.insert(0, ["SELL", "WHEAT", n])
++        else:
++            market.append(["SELL", "WHEAT", n])
++        return True
++    market.insert(0, ["SELL", "WHEAT", n])
++    return True
++
++
++def _x466_cap_pickups(obs, seen, action):
++    """PICKUP WHEAT beyond the stock I2 sees -> capped to it (the engine then gives what it gives I2)"""
++    avail = int(seen["private"]["shed"].get("WHEAT", 0))
++    view = FarmView(obs)
++    units = [action.get("farmer") or ["PASS"]] + list(action.get("hands") or [])
++    out, changed = [], False
++    for i, a in enumerate(units):
++        if (isinstance(a, list) and len(a) >= 2 and a[0] == "PICKUP" and a[1] == "WHEAT" and i < len(view.positions)
++                and _shed_adjacent(view.positions[i], view.board)):
++            k = max(0, _int(a[2]) if len(a) >= 3 else 1)
++            take = min(k, max(0, avail))
++            avail -= take
++            if take < k:
++                a, changed = ["PICKUP", "WHEAT", take], True
++                _X466_REPORT["pickup_capped"] += 1
++        out.append(a)
++    if not changed:
++        return action
++    return dict(action, farmer=out[0], hands=out[1:])
++
++
++def _x466_buy(obs, action, market, step, player):
++    """place this step's wash BUY; returns the held record or None"""
++    mode = _X466_CFG["tw"]
++    native = _IMPL.chassis.players.get(player) or {}
++    tape = _IMPL.chassis.routes.get(native.get("route"))
++    if not tape or step + 1 >= len(tape):
++        return None
++    view = FarmView(obs)
++    proj = projected_shed(action, view)
++    n = _x466_room(view, action, proj, _X466_CFG["rival"])
++    if n < _X466_NMIN:
++        return None
++    farm = obs["farms"][player]
++    prices = obs["market"]["prices"]
++    quads = len(farm["unlocked_quadrants"])
++    budget = (float(farm["money"]) - _x466_spend(market, prices, _get(farm, "hires_today", 0), quads)
++              - _x466_spend(tape[step + 1].get("market") or [], prices, 0, quads) - 300)
++    inv = int(obs["market"]["inventory"]["WHEAT"])
++    cost, k = 0.0, 0
++    while k < n:
++        c = _r37_market_price("WHEAT", inv - 1 - 2 * k)
++        if cost + c > budget:
++            break
++        cost, k = cost + c, k + 1
++    if k < _X466_NMIN:
++        _X466_REPORT["skipped_money"] += 1
++        return None
++    n = k
++    if mode == "SMART":
++        j = next((j for j, o in enumerate(market) if isinstance(o, list) and o[:2] == ["BUY_PRODUCT", "WHEAT"] and len(o) >= 3),
++                 None)
++        if j is not None:
++            market[j] = ["BUY_PRODUCT", "WHEAT", _int(market[j][2]) + n]
++        elif len(market) >= 10:
++            _X466_REPORT["skipped_full"] += 1
++            return None
++        else:
++            last = max((j for j, o in enumerate(market) if isinstance(o, list) and o and o[0] in ("SELL", "BUY_PRODUCT")),
++                       default=-1)
++            market.insert(last + 1, ["BUY_PRODUCT", "WHEAT", n])
++    elif len(market) >= 10:
++        _X466_REPORT["skipped_full"] += 1
++        return None
++    elif mode == "END":
++        market.append(["BUY_PRODUCT", "WHEAT", n])
++    else:
++        market.insert(0, ["BUY_PRODUCT", "WHEAT", n])
++    orders = action.get("market") or []
++    pbuy = sum(max(0, _int(o[2])) for o in orders if isinstance(o, list) and o[:2] == ["BUY_PRODUCT", "WHEAT"] and len(o) >= 3)
++    psell = sum(max(0, _int(o[2])) for o in orders if isinstance(o, list) and o[:2] == ["SELL", "WHEAT"] and len(o) >= 3)
++    lone = sum(_r37_market_price("WHEAT", inv - 1 - j) for j in range(n))
++    _X466_REPORT["washes"] += 1
++    _X466_REPORT["units"] += n
++    return dict(t=step, n=n, lone=lone, pre=int(proj.get("WHEAT", 0)), pbuy=pbuy, psell=psell, left=_X466_CARRY)
++
++
++def v466_market_agent(observation, configuration=None):
++    step, player = int(observation["step"]), int(observation["player"])
++    if step == 0:
++        for k in _X466_REPORT:
++            _X466_REPORT[k] = 0
++        _X466_REPORT["first_fire"] = -1
++    st = _X466_STATE.get(player)
++    if st is None or step <= st["last"]:
++        st = _X466_STATE[player] = dict(last=-1, h=None)
++    st["last"] = step
++    h, seen = st["h"], observation
++    if h is not None:
++        try:
++            if "held" not in h:
++                h["held"] = _x466_verify(observation, h)
++                h["cost"] = h["lone"] * h["held"] / h["n"] if h["n"] else 0.0
++            seen = _x466_hide(observation, h) if h["held"] > 0 else observation
++        except Exception:
++            _X466_REPORT["errors"] += 1
++            st["h"], h, seen = None, None, observation
++    action = _X466_PARENT(seen, configuration)
++    try:
++        market = [list(o) if isinstance(o, (list, tuple)) else o for o in (action.get("market") or [])]
++        before = [list(o) if isinstance(o, (list, tuple)) else o for o in market]
++        out = action
++        if _X466_CFG["sq"]:
++            m2 = _x466_sq(seen, market)
++            if m2 != market:
++                _X466_REPORT["sq_steps"] += 1
++                market = m2
++        if h is not None:
++            if h["held"] > 0:
++                out = _x466_cap_pickups(observation, seen, action)
++                if _x466_sell(observation, seen, action, market, h):
++                    st["h"] = None
++                else:
++                    h["left"] -= 1
++                    _X466_REPORT["carried"] += 1
++                    if h["left"] <= 0:
++                        st["h"] = None
++                        _X466_REPORT["revealed"] += 1
++            else:
++                st["h"] = None
++        if (_X466_CFG["tw"] and st["h"] is None and step % 4 == 0 and _X466_LO <= step <= _X466_HI):
++            rec = _x466_buy(observation, action, market, step, player)
++            if rec is not None:
++                st["h"] = rec
++        if market == before and out is action:
++            return action
++        _x466_fire(step)
++        return dict(out, market=market)
++    except Exception:
++        _X466_REPORT["errors"] += 1
++        return action
++
++
++v466_market_agent.telemetry = _X466_REPORT
++agent = v466_market_agent
++kaggle_submission_agent = agent
++
++
++# ---------------------------------------------------------------------------
++# v467 MARKET layer (2026-09-28, lane v467; results/v467/MECH.md): market orders only, on top of TWSQ (whose code above is
++# unchanged; this layer rebinds two of TWSQ's layer functions in the file's own override pattern and wraps its entry).
++# FIX (MECH b): (1) the stake sort never moves a SELL ahead of a same-step BUY_PRODUCT of the same item (SQ put I2's S1 close
++#   SELL WHEAT 59 before its BUY 59, so the wash was held instead of closed); (2) the tick-wash BUY is never merged into a
++#   BUY_PRODUCT WHEAT that the same step closes (the next order is a SELL WHEAT: S1 / a same-step closer), because a
++#   same-step closer at that index then sells into our held units' price impact; it merges into the first unclosed WHEAT
++#   buy, else goes after the last SELL/BUY_PRODUCT as TWSQ places it. NOSQ arms drop the stake sort.
++# CLOSE (MECH c): while the rival is observed tick-washing (>= 2 of its last 3 tick pairs: net WHEAT buy >= 10 at t % 4 == 0
++#   and net sell >= 10 at t+1, inferred as our net sell - town consumption - the change in market WHEAT inventory), a
++#   fraction of this step's wash is sold right after our wash BUY in the same step (capturing a lockstep rival's impact);
++#   the rest is held across the tick as in TWSQ.
++# When no feature changes the step's orders, TWSQ's action is returned unchanged.
++# ---------------------------------------------------------------------------
++_X467_PARENT = agent
++_X467_CFG = dict(fix=True, sq=True, close=1.0)
++_X467_SQ_BASE = _x466_sq
++_X467_STATE = {}
++_X467_WHEAT_SHOPS = ("BAKERY", "PIZZA_SHOP", "BRUNCH_SPOT", "ICE_CREAM_SHOP", "FARMERS_MARKET")
++_X467_REPORT = dict(fired=0, first_fire=-1, sq_pinned=0, unmerged=0, detected_steps=0, closes=0, close_units=0, errors=0)
++
++
++def _x467_fire(step):
++    _X467_REPORT["fired"] = 1
++    if _X467_REPORT["first_fire"] < 0:
++        _X467_REPORT["first_fire"] = step
++
++
++def _x467_sq(obs, market):
++    if not _X467_CFG["sq"]:
++        return market
++    if not _X467_CFG["fix"]:
++        return _X467_SQ_BASE(obs, market)
++    bought, pinned = set(), set()
++    for k, o in enumerate(market):
++        if isinstance(o, list) and len(o) >= 3:
++            if o[0] == "BUY_PRODUCT":
++                bought.add(o[1])
++            elif o[0] == "SELL" and o[1] in bought:
++                pinned.add(k)
++    if not pinned:
++        return _X467_SQ_BASE(obs, market)
++    masked = [["_PINNED"] if k in pinned else o for k, o in enumerate(market)]
++    out = [market[k] if k in pinned else o for k, o in enumerate(_X467_SQ_BASE(obs, masked))]
++    if out != _X467_SQ_BASE(obs, market):
++        _X467_REPORT["sq_pinned"] += 1
++        _x467_fire(int(obs["step"]))
++    return out
++
++
++def _x467_buy(obs, action, market, step, player):
++    """TWSQ's _x466_buy (SMART) with FIX (2): never merged into a WHEAT buy that the next order closes; records the index"""
++    native = _IMPL.chassis.players.get(player) or {}
++    tape = _IMPL.chassis.routes.get(native.get("route"))
++    if not tape or step + 1 >= len(tape):
++        return None
++    view = FarmView(obs)
++    proj = projected_shed(action, view)
++    n = _x466_room(view, action, proj, _X466_CFG["rival"])
++    if n < _X466_NMIN:
++        return None
++    farm = obs["farms"][player]
++    prices = obs["market"]["prices"]
++    quads = len(farm["unlocked_quadrants"])
++    budget = (float(farm["money"]) - _x466_spend(market, prices, _get(farm, "hires_today", 0), quads)
++              - _x466_spend(tape[step + 1].get("market") or [], prices, 0, quads) - 300)
++    inv = int(obs["market"]["inventory"]["WHEAT"])
++    cost, k = 0.0, 0
++    while k < n:
++        c = _r37_market_price("WHEAT", inv - 1 - 2 * k)
++        if cost + c > budget:
++            break
++        cost, k = cost + c, k + 1
++    if k < _X466_NMIN:
++        _X466_REPORT["skipped_money"] += 1
++        return None
++    n = k
++
++    def is_buy(o):
++        return isinstance(o, list) and o[:2] == ["BUY_PRODUCT", "WHEAT"] and len(o) >= 3
++
++    def closed(j):
++        return (_X467_CFG["fix"] and j + 1 < len(market) and isinstance(market[j + 1], list)
++                and market[j + 1][:2] == ["SELL", "WHEAT"])
++    first = next((j for j, o in enumerate(market) if is_buy(o)), None)
++    j = next((j for j, o in enumerate(market) if is_buy(o) and not closed(j)), None)
++    if first is not None and j != first:
++        _X467_REPORT["unmerged"] += 1
++        _x467_fire(step)
++    if j is not None:
++        market[j] = ["BUY_PRODUCT", "WHEAT", _int(market[j][2]) + n]
++        at = j
++    elif len(market) >= 10:
++        _X466_REPORT["skipped_full"] += 1
++        return None
++    else:
++        last = max((j for j, o in enumerate(market) if isinstance(o, list) and o and o[0] in ("SELL", "BUY_PRODUCT")),
++                   default=-1)
++        market.insert(last + 1, ["BUY_PRODUCT", "WHEAT", n])
++        at = last + 1
++    orders = action.get("market") or []
++    pbuy = sum(max(0, _int(o[2])) for o in orders if isinstance(o, list) and o[:2] == ["BUY_PRODUCT", "WHEAT"] and len(o) >= 3)
++    psell = sum(max(0, _int(o[2])) for o in orders if isinstance(o, list) and o[:2] == ["SELL", "WHEAT"] and len(o) >= 3)
++    lone = sum(_r37_market_price("WHEAT", inv - 1 - i) for i in range(n))
++    _X466_REPORT["washes"] += 1
++    _X466_REPORT["units"] += n
++    return dict(t=step, n=n, lone=lone, pre=int(proj.get("WHEAT", 0)), pbuy=pbuy, psell=psell, left=_X466_CARRY, k=at)
++
++
++_x466_sq = _x467_sq
++if _X466_CFG["tw"] == "SMART":
++    _x466_buy = _x467_buy
++
++
++def _x467_consumed(shops, step):
++    c = 0
++    if step % 4 == 0:
++        c += sum(1 for s in shops if s in _X467_WHEAT_SHOPS)
++    if step % 24 == 0:
++        c += 1
++    return c
++
++
++def _x467_detect(obs, st):
++    """update the rival's inferred net WHEAT buy of the previous step and the tick-pair record; True if tick-washing"""
++    step = int(obs["step"])
++    inv = int(obs["market"]["inventory"]["WHEAT"])
++    prev = st.get("prev")
++    if prev and prev["step"] == step - 1:
++        rival = prev["own_sell"] - prev["own_buy"] - _x467_consumed(prev["shops"], prev["step"]) - (inv - prev["inv"])
++        st["rnb"][prev["step"]] = rival
++        t = prev["step"] - 1
++        if t % 4 == 0 and t in st["rnb"]:
++            st["pairs"].append(st["rnb"][t] >= 10 and rival <= -10)
++            st["pairs"] = st["pairs"][-3:]
++        for old in [x for x in st["rnb"] if x < step - 8]:
++            del st["rnb"][old]
++    return sum(st["pairs"]) >= 2
++
++
++def _x467_record(obs, st, action):
++    market = action.get("market") or []
++    buy = sum(max(0, _int(o[2])) for o in market if isinstance(o, list) and o[:2] == ["BUY_PRODUCT", "WHEAT"] and len(o) >= 3)
++    sell = sum(max(0, _int(o[2])) for o in market if isinstance(o, list) and o[:2] == ["SELL", "WHEAT"] and len(o) >= 3)
++    have = int(obs["private"]["shed"].get("WHEAT", 0))
++    st["prev"] = dict(step=int(obs["step"]), inv=int(obs["market"]["inventory"]["WHEAT"]), own_buy=buy,
++                      own_sell=min(sell, have + buy), shops=list(obs["town"]["unlocked_shops"]))
++
++
++def _x467_close(obs, action, step, player):
++    h = (_X466_STATE.get(player) or {}).get("h")
++    if not h or h.get("t") != step or "held" in h or "k" not in h:
++        return action
++    market = [list(o) if isinstance(o, (list, tuple)) else o for o in (action.get("market") or [])]
++    m = min(h["n"], int(round(h["n"] * _X467_CFG["close"])))
++    k = h["k"]
++    if m <= 0 or len(market) >= 10 or k >= len(market) or market[k][:2] != ["BUY_PRODUCT", "WHEAT"]:
++        return action
++    market.insert(k + 1, ["SELL", "WHEAT", m])
++    left = h["n"] - m
++    if left <= 0:
++        _X466_STATE[player]["h"] = None
++    else:
++        h["lone"] = h["lone"] * left / h["n"]
++        h["n"] = left
++    _X467_REPORT["closes"] += 1
++    _X467_REPORT["close_units"] += m
++    _x467_fire(step)
++    return dict(action, market=market)
++
++
++def v467_market_agent(observation, configuration=None):
++    step, player = int(observation["step"]), int(observation["player"])
++    if step == 0:
++        for k in _X467_REPORT:
++            _X467_REPORT[k] = 0
++        _X467_REPORT["first_fire"] = -1
++    st = _X467_STATE.get(player)
++    if st is None or step <= st["last"]:
++        st = _X467_STATE[player] = dict(last=-1, prev=None, rnb={}, pairs=[])
++    st["last"] = step
++    action = _X467_PARENT(observation, configuration)
++    try:
++        out = action
++        if _X467_CFG["close"] > 0:
++            if _x467_detect(observation, st):
++                _X467_REPORT["detected_steps"] += 1
++                out = _x467_close(observation, action, step, player)
++            _x467_record(observation, st, out)
++        return out
++    except Exception:
++        _X467_REPORT["errors"] += 1
++        return action
++
++
++v467_market_agent.telemetry = _X467_REPORT
++agent = v467_market_agent
++kaggle_submission_agent = agent
++# ---------------------------------------------------------------------------
++# v469 FRONT-RUN layer (2026-09-28, lane v469; results/v469/MECH.md): market orders only, on top of FXC (= TWSQ + the v467 layer; its
++# code above is unchanged). It rebinds FXC's wash BUY (_x466_buy) and FXC's rival detector (_x467_detect) in the file's own override
++# pattern and wraps the entry. When no rule acts, FXC's action is returned unchanged.
++# Observables (the engine's own accounting): the rival's net units bought of every product at step u = our net sale of it at u (our
++#   orders; sales capped in queue order by the projected shed + our buys) - the town's consumption of it at u - the change in market
++#   inventory; the rival's money is in the observation.
++# TW event at tick tau: the rival's net WHEAT buy >= 10 at tau and a net sale <= -10 within 2 steps.
++# SC event at tick v: the rival's net flow is 0 in every product and its money rose by >= 10 (a profitable same-step round trip).
++# FRONT ('last': a TW event at t-4; '2of3': at >= 2 of t-4, t-8, t-12; or SC: >= K SC events): at t-1 BUY m WHEAT (TWSQ's room bound
++#   and a lockstep money guard); the m units are hidden from FXC at t (as TWSQ hides its held wash: shed - m, money + cost, market
++#   inventory + m), FXC's own WHEAT sales at t are capped to the stock it sees, and at t:
++#   - after a TW prediction: no own wash at t; SELL m at queue index 9 (the queue padded with SELL WHEAT 0 = empty slots), after the
++#     rival's wash BUY;
++#   - after SC: FXC's same-step close is forced at t and the m units are added to the close SELL right after our wash BUY (FXC's wash
++#     room is reduced by m); without a wash at t the m units go to index 9.
++#   A sale that does not fit (queue full) is carried to the next step, up to 3 steps, still hidden.
++# FR: no own wash at t when the rival net-bought >= 20 WHEAT at t-1 (v468).
++# ---------------------------------------------------------------------------
++_X469_PARENT = agent
++_X469_CFG = dict(front='2of3', fr=True, sc=3)
++_X469_BUY_BASE = _x466_buy
++_X469_DETECT_BASE = _x467_detect
++_X469_SHOPS = {"BAKERY": ("EGG", "WHEAT"), "PIZZA_SHOP": ("MILK", "TOMATO", "WHEAT"), "BRUNCH_SPOT": ("EGG", "WHEAT", "STRAWBERRY"),
++               "YARN_STORE": ("WOOL",), "ICE_CREAM_SHOP": ("STRAWBERRY", "MILK", "WHEAT"), "PET_CAFE": ("CARROT",),
++               "SMOOTHIE_SHOP": ("STRAWBERRY", "MILK"), "FARMERS_MARKET": ("WHEAT", "CARROT", "TOMATO", "STRAWBERRY")}
++_X469_CENTER = ("WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON", "EGG", "MILK", "WOOL")
++_X469_MIN, _X469_FR, _X469_SCM, _X469_CARRY = 10, 20, 10, 3
++_X469_STATE = {}
++_X469_REPORT = dict(fired=0, first_fire=-1, fronts_tw=0, fronts_sc=0, front_units=0, fr_skips=0, tw_events=0, sc_events=0, carried=0,
++                    revealed=0, capped_sells=0, underfill=0, errors=0)
++
++
++def _x469_fire(step):
++    _X469_REPORT["fired"] = 1
++    if _X469_REPORT["first_fire"] < 0:
++        _X469_REPORT["first_fire"] = step
++
++
++def _x469_consumed(shops, step):
++    c = {}
++    if step % 4 == 0:
++        for s in shops:
++            prods = _X469_SHOPS.get(s, ())
++            for p in prods:
++                c[p] = c.get(p, 0) + (2 if len(prods) == 1 else 1)
++    if step % 24 == 0:
++        for p in _X469_CENTER:
++            c[p] = c.get(p, 0) + 1
++    return c
++
++
++def _x469_own(obs, action):
++    """our net units bought per product in this step's final orders (buys assumed filled, sales capped by the stock in queue order)"""
++    shed = dict(projected_shed(action, FarmView(obs)))
++    net = {}
++    for o in action.get("market") or []:
++        if isinstance(o, list) and len(o) >= 3 and o[1] in PRODUCTS and o[0] in ("BUY_PRODUCT", "SELL"):
++            q = max(0, _int(o[2]))
++            if o[0] == "BUY_PRODUCT":
++                shed[o[1]] = int(shed.get(o[1], 0)) + q
++                net[o[1]] = net.get(o[1], 0) + q
++            else:
++                k = min(q, max(0, int(shed.get(o[1], 0))))
++                shed[o[1]] = int(shed.get(o[1], 0)) - k
++                net[o[1]] = net.get(o[1], 0) - k
++    return net
++
++
++def _x469_observe(obs, st):
++    """the rival's net flows and money change of the previous step; TW and SC events now observable"""
++    step, player = int(obs["step"]), int(obs["player"])
++    prev = st.get("prev")
++    if prev and prev["step"] == step - 1:
++        inv = obs["market"]["inventory"]
++        cons = _x469_consumed(prev["shops"], step - 1)
++        flows = {}
++        for p in PRODUCTS:
++            r = -prev["own"].get(p, 0) - cons.get(p, 0) - (int(inv.get(p, 0)) - int(prev["inv"].get(p, 0)))
++            if r:
++                flows[p] = r
++        st["r"][step - 1] = flows
++        dm = float(obs["farms"][1 - player]["money"]) - prev["rmoney"]
++        v = step - 1
++        if v % 4 == 0 and v >= _X466_LO and not flows and dm >= _X469_SCM:
++            st["sc"].append(v)
++            _X469_REPORT["sc_events"] += 1
++    r = st["r"]
++    for tau in [x for x in range(step - 3, step - 1) if x % 4 == 0 and x not in st["tw"]]:
++        b0, b1, b2 = (r.get(tau, {}).get("WHEAT", 0), r.get(tau + 1, {}).get("WHEAT", 0), r.get(tau + 2, {}).get("WHEAT", 0))
++        if b0 >= _X469_MIN and tau + 2 < step and min(b1, b2) <= -_X469_MIN:
++            st["tw"][tau] = b0
++            _X469_REPORT["tw_events"] += 1
++    for old in [x for x in r if x < step - 16]:
++        del r[old]
++
++
++def _x469_hit(step, st):
++    """at step t-1: the front-run mode for the tick t = step + 1 ('tw', 'sc' or None)"""
++    t = step + 1
++    f = _X469_CFG["front"]
++    if f == "last" and (t - 4) in st["tw"]:
++        return "tw"
++    if f == "2of3" and sum((t - 4 * k) in st["tw"] for k in (1, 2, 3)) >= 2:
++        return "tw"
++    if _X469_CFG["sc"] and len(st["sc"]) >= _X469_CFG["sc"]:
++        return "sc"
++    return None
++
++
++def _x469_size(obs, action, market, step, player):
++    """TWSQ's room bound for units held from this step to the next, and a lockstep money guard (as _x466_buy)"""
++    native = _IMPL.chassis.players.get(player) or {}
++    tape = _IMPL.chassis.routes.get(native.get("route"))
++    if not tape or step + 1 >= len(tape):
++        return 0
++    view = FarmView(obs)
++    n = _x466_room(view, action, projected_shed(action, view), False)
++    farm = obs["farms"][player]
++    prices = obs["market"]["prices"]
++    quads = len(farm["unlocked_quadrants"])
++    budget = (float(farm["money"]) - _x466_spend(market, prices, _get(farm, "hires_today", 0), quads)
++              - _x466_spend(tape[step + 1].get("market") or [], prices, 0, quads) - 300)
++    inv = int(obs["market"]["inventory"]["WHEAT"])
++    cost, k = 0.0, 0
++    while k < n:
++        c = _r37_market_price("WHEAT", inv - 1 - 2 * k)
++        if cost + c > budget:
++            break
++        cost, k = cost + c, k + 1
++    return k
++
++
++def _x469_buy(obs, action, market, step, player):
++    """FXC's wash BUY, skipped (tw front-run tick, FR) or with its room reduced by our held front-run units (sc)"""
++    st = _X469_STATE.get(player) or {}
++    if st.get("skip") == step:
++        return None
++    held = st.get("room_less", 0) if st.get("room_step") == step else 0
++    if held <= 0:
++        return _X469_BUY_BASE(obs, action, market, step, player)
++    global _x466_room
++    room = _x466_room
++    _x466_room = lambda view, act, proj, rival: room(view, act, proj, rival) - held
++    try:
++        return _X469_BUY_BASE(obs, action, market, step, player)
++    finally:
++        _x466_room = room
++
++
++def _x469_detect(obs, st7):
++    r = _X469_DETECT_BASE(obs, st7)
++    st = _X469_STATE.get(int(obs["player"])) or {}
++    return r or st.get("force") == int(obs["step"])
++
++
++_x466_buy = _x469_buy
++_x467_detect = _x469_detect
++
++
++def _x469_cap_sells(seen, action, market):
++    """FXC's own WHEAT sales capped to the stock FXC sees (so they cannot sell our hidden units ahead of our sale)"""
++    have = int(projected_shed(action, FarmView(seen)).get("WHEAT", 0))
++    out, changed = [], False
++    for o in market:
++        if isinstance(o, list) and len(o) >= 3 and o[1] == "WHEAT":
++            q = max(0, _int(o[2]))
++            if o[0] == "BUY_PRODUCT":
++                have += q
++            elif o[0] == "SELL":
++                k = min(q, max(0, have))
++                have -= k
++                if k < q:
++                    o, changed = ["SELL", "WHEAT", k], True
++        out.append(o)
++    if changed:
++        _X469_REPORT["capped_sells"] += 1
++    return out
++
++
++def _x469_sell(market, h, step):
++    """place the held front-run sale; True if placed"""
++    n = h["held"]
++    if h["mode"] == "sc":
++        k = next((j for j, o in enumerate(market) if isinstance(o, list) and o[:2] == ["BUY_PRODUCT", "WHEAT"]), None)
++        if k is not None and k + 1 < len(market) and isinstance(market[k + 1], list) and market[k + 1][:2] == ["SELL", "WHEAT"] \
++                and len(market[k + 1]) >= 3:
++            market[k + 1] = ["SELL", "WHEAT", _int(market[k + 1][2]) + n]
++            return True
++    if len(market) >= 10:
++        return False
++    market.extend([["SELL", "WHEAT", 0]] * (9 - len(market)) + [["SELL", "WHEAT", n]] if step % 4 == 0 else [["SELL", "WHEAT", n]])
++    return True
++
++
++def v469_market_agent(observation, configuration=None):
++    step, player = int(observation["step"]), int(observation["player"])
++    if step == 0:
++        for k in _X469_REPORT:
++            _X469_REPORT[k] = 0
++        _X469_REPORT["first_fire"] = -1
++    st = _X469_STATE.get(player)
++    if st is None or step <= st["last"]:
++        st = _X469_STATE[player] = dict(last=-1, prev=None, r={}, tw={}, sc=[], h=None, skip=-1, force=-1, room_step=-1, room_less=0)
++    st["last"] = step
++    seen, h = observation, st["h"]
++    try:
++        _x469_observe(observation, st)
++        if h is not None:
++            if "held" not in h:
++                have = int(observation["private"]["shed"].get("WHEAT", 0))
++                alone = h["pre"] + h["pbuy"] - min(h["psell"], h["pre"] + h["pbuy"])
++                h["held"] = max(0, min(h["n"], have - alone))
++                if h["held"] < h["n"]:
++                    _X469_REPORT["underfill"] += 1
++                h["cost"] = h["lone"] * h["held"] / h["n"] if h["n"] else 0.0
++            if h["held"] <= 0:
++                st["h"], h = None, None
++            else:
++                seen = _x466_hide(observation, h)
++                if step % 4 == 0 and h["t"] == step:
++                    if h["mode"] == "sc" and not (_X469_CFG["fr"] and st["r"].get(step - 1, {}).get("WHEAT", 0) >= _X469_FR):
++                        st["force"], st["room_step"], st["room_less"] = step, step, h["held"]
++                    else:
++                        h["mode"] = "tw"
++                        st["skip"] = step
++        elif (step % 4 == 0 and _X469_CFG["fr"] and _X466_LO <= step <= _X466_HI
++              and st["r"].get(step - 1, {}).get("WHEAT", 0) >= _X469_FR):
++            st["skip"] = step
++            _X469_REPORT["fr_skips"] += 1
++            _x469_fire(step)
++    except Exception:
++        _X469_REPORT["errors"] += 1
++        st["h"], h, seen = None, None, observation
++    action = _X469_PARENT(seen, configuration)
++    out = action
++    try:
++        market = [list(o) if isinstance(o, (list, tuple)) else o for o in (action.get("market") or [])]
++        before = [list(o) if isinstance(o, (list, tuple)) else o for o in market]
++        if h is not None:
++            market = _x469_cap_sells(seen, action, market)
++            if _x469_sell(market, h, step):
++                st["h"] = None
++            else:
++                h["left"] -= 1
++                _X469_REPORT["carried"] += 1
++                if h["left"] <= 0:
++                    st["h"] = None
++                    _X469_REPORT["revealed"] += 1
++        elif ((step + 1) % 4 == 0 and _X466_LO <= step + 1 <= _X466_HI and len(market) < 10
++              and (_X466_STATE.get(player) or {}).get("h") is None):
++            mode = _x469_hit(step, st)
++            if mode:
++                m = _x469_size(observation, action, market, step, player)
++                if m >= _X469_MIN:
++                    market.append(["BUY_PRODUCT", "WHEAT", m])
++                    orders = action.get("market") or []
++                    inv = int(observation["market"]["inventory"]["WHEAT"])
++                    st["h"] = dict(t=step + 1, n=m, mode=mode, left=_X469_CARRY,
++                                   lone=sum(_r37_market_price("WHEAT", inv - 1 - j) for j in range(m)),
++                                   pre=int(projected_shed(action, FarmView(observation)).get("WHEAT", 0)),
++                                   pbuy=sum(max(0, _int(o[2])) for o in orders if isinstance(o, list) and o[:2] == ["BUY_PRODUCT", "WHEAT"] and len(o) >= 3),
++                                   psell=sum(max(0, _int(o[2])) for o in orders if isinstance(o, list) and o[:2] == ["SELL", "WHEAT"] and len(o) >= 3))
++                    _X469_REPORT["fronts_tw" if mode == "tw" else "fronts_sc"] += 1
++                    _X469_REPORT["front_units"] += m
++                    _x469_fire(step)
++        if market != before:
++            out = dict(action, market=market)
++    except Exception:
++        _X469_REPORT["errors"] += 1
++        out = action
++    try:
++        st["prev"] = dict(step=step, inv={p: int(observation["market"]["inventory"].get(p, 0)) for p in PRODUCTS},
++                          own=_x469_own(observation, out), shops=list(observation["town"]["unlocked_shops"]),
++                          rmoney=float(observation["farms"][1 - player]["money"]))
++    except Exception:
++        _X469_REPORT["errors"] += 1
++        st["prev"] = None
++    return out
++
++
++v469_market_agent.telemetry = _X469_REPORT
++agent = v469_market_agent
++kaggle_submission_agent = agent
