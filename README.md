@@ -16,8 +16,8 @@ farming game decided in a shared market. The bot finished **702nd of 10,148 team
 > [!NOTE]
 > **Built on public code.** The bot is a public Apache-2.0 bot, tetsutani's
 > [Demand-Preserving Turn Sale Timing](https://www.kaggle.com/code/tetsutani/demand-preserving-turn-sale-timing) (itself built on work
-> by yhay81, Thomas Tschinkel, Ahmed Berat Ozer and others), plus our own layers. **893 of its 11,025 lines are ours**;
-> [`docs/our-changes.patch`](docs/our-changes.patch) shows every one of them. All upstream notices ship unchanged in
+> by yhay81, Thomas Tschinkel, Ahmed Berat Ozer and others), plus our own layers. **893 of its 11,025 lines are ours** (888 new,
+> 5 edited); [`docs/our-changes.patch`](docs/our-changes.patch) shows every one of them. All upstream notices ship unchanged in
 > [`submission/`](submission/), and every author is listed under [Credits](#credits).
 
 ## Result
@@ -25,11 +25,12 @@ farming game decided in a shared market. The bot finished **702nd of 10,148 team
 | Final standing | **702nd of 10,148 teams** · bronze medal (top 7%) |
 |---|---|
 | Final tournament score | 4,457.8 for this bot; its one-line twin scored 4,450.8 |
-| Ladder rating at the submission deadline | 2,087, just above that day's top-5% line of 2,081 |
+| Public ladder at the submission deadline | 486th, rating 2,087; the top-5% line was 2,081 |
 | Work | 88 submissions over 44 days, solo team |
 
-Our goal was silver (top 5%, rank 507 or better). The bot held the silver line on the public ladder at the deadline and slipped below
-it in the final Bradley-Terry tournament.
+Kaggle ran two different rankings. The public ladder is a rating that moves after every game; at the deadline it had us 486th, inside
+the silver line. The final standings came from a separate Bradley-Terry fit on wins and losses over the whole competition, on its own
+scale; there we placed 702nd. Our goal was silver (507th or better), so we missed it by 195 places.
 
 ## The game in 30 seconds
 
@@ -122,7 +123,7 @@ submission/NOTICE.txt   upstream attribution, as shipped
 play.py                 play it locally with kaggle-environments 1.32.7
 docs/how-it-works.md    engine facts and every layer
 docs/evaluation.md      test design and every gate number
-docs/our-changes.patch  our 893 lines, as a diff against the public X2 file (sha256 55be5d5f…)
+docs/our-changes.patch  our 893 lines (888 new, 5 edited) as a diff against the public X2 file
 docs/submissions.csv    all 88 submissions: date, ladder rating at the deadline, phase
 assets/                 banner and diagrams
 ```
