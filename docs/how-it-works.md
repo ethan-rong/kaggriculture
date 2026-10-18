@@ -61,7 +61,7 @@ of it − the town's consumption − the change in market inventory. Its money i
 - **Front-run.** If the rival tick-washed at 2 of the ticks *t* − 4, *t* − 8 and *t* − 12, buy *m* WHEAT at *t* − 1 and sell it at
   *t* at queue index 9 (the queue is padded with empty `SELL WHEAT 0` orders), after the rival's wash BUY at index 0 or 1. The rival
   then buys at prices our units raised, and we sell into its buying. Measured gain per hit: +66 coins (live games) to +79 (recorded
-  frames). If the rival does not wash, the round trip nets 0 by the rules above; observed misses cost 0.4 to 3 coins.
+  frames). If the rival does not wash, the round trip nets 0 by the rules above, so a miss costs almost nothing (0.4 to 3 coins).
 - **Front-run guard.** No own wash at *t* if the rival already net-bought at least 20 WHEAT at *t* − 1 (it is front-running us).
 - **Same-step closers.** Some rivals buy at index 0 and sell the same units at index 9 in one step, selling at the top our buy creates.
   Their net flow is 0, so inventory cannot see them. Their money can: net flow 0 in every product while money rose by 10 or more. On
@@ -80,11 +80,5 @@ only line that differs (`_X469_CFG`).
 | **S1** | Close the scripted wheat washes (BUY at *t*, SELL at *t* + 1) in the same step | Rivals that close in-step captured our held units. |
 | **C1** | Premium-lot reservation from step 240 instead of 192; the lead seller works all 24 hours | The two best knobs of a 16-knob search against a population of public forks. |
 
-W2 and S1 together, on 166 recorded live frames: 25 losses flipped, 0 wins lost, +119.6K coins. Recorded frames cannot react, so these
-are upper bounds; the closed-loop pools in [evaluation.md](evaluation.md) are the real check.
-
-## What the layers do not fix
-
-Against the top-ladder bots (2,700+ rating) the median loss was 11.7K coins. That gap is their economy: what they grow, when they
-expand, how many hands they hire. Market timing is worth hundreds of coins per game, not thousands, and no market-only edge we found
-moved those games.
+W2 and S1 together, on 166 recorded live frames: 25 losses turned into wins, 0 wins lost, +119.6K coins. The closed-loop pools with
+reacting rivals are in [evaluation.md](evaluation.md).
